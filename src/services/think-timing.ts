@@ -49,8 +49,31 @@ function frameCarriers(record: any): any[] {
 /** 取一帧增量里的思维链文本（空字符串视为无思维链） */
 export function reasoningTextOf(record: any): string {
   if (!record || typeof record !== 'object') return '';
+  // Google Gemini / Vertex AI candidates 格式：content.parts[].thought === true
+  const candidates = Array.isArray(record?.candidates) ? record.candidates : [];
+  for (const cand of candidates) {
+    const parts = Array.isArray(cand?.content?.parts)
+      ? cand.content.parts
+      : (Array.isArray(cand?.delta?.parts) ? cand.delta.parts : (Array.isArray(cand?.parts) ? cand.parts : []));
+    for (const part of parts) {
+      if (!part || typeof part !== 'object') continue;
+      if (part.thought === true || (part as any).type === 'thought') {
+        const text = textOf(part.text || (part as any).thought);
+        if (text) return text;
+      }
+    }
+  }
   for (const carrier of frameCarriers(record)) {
     if (!carrier || typeof carrier !== 'object') continue;
+    if (Array.isArray(carrier.parts)) {
+      for (const part of carrier.parts) {
+        if (!part || typeof part !== 'object') continue;
+        if (part.thought === true || part.type === 'thought') {
+          const text = textOf(part.text);
+          if (text) return text;
+        }
+      }
+    }
     for (const key of REASONING_KEYS) {
       const text = textOf((carrier as any)[key]);
       if (text) return text;
@@ -63,8 +86,29 @@ export function reasoningTextOf(record: any): string {
 /** 取一帧增量里的正文文本（空字符串=尚无正文，例如仅带 content:null 的思维链帧） */
 export function contentTextOf(record: any): string {
   if (!record || typeof record !== 'object') return '';
+  // Google Gemini / Vertex AI candidates 格式：content.parts 且非 thought 标记
+  const candidates = Array.isArray(record?.candidates) ? record.candidates : [];
+  for (const cand of candidates) {
+    const parts = Array.isArray(cand?.content?.parts)
+      ? cand.content.parts
+      : (Array.isArray(cand?.delta?.parts) ? cand.delta.parts : (Array.isArray(cand?.parts) ? cand.parts : []));
+    for (const part of parts) {
+      if (!part || typeof part !== 'object') continue;
+      if (part.thought === true || (part as any).type === 'thought') continue;
+      const text = textOf(part.text);
+      if (text) return text;
+    }
+  }
   for (const carrier of frameCarriers(record)) {
     if (!carrier || typeof carrier !== 'object') continue;
+    if (Array.isArray(carrier.parts)) {
+      for (const part of carrier.parts) {
+        if (!part || typeof part !== 'object') continue;
+        if (part.thought === true || part.type === 'thought') continue;
+        const text = textOf(part.text);
+        if (text) return text;
+      }
+    }
     const direct = textOf((carrier as any).content);
     if (direct) return direct;
     // Anthropic 风格：{ type: 'content_block_delta', delta: { type: 'text_delta', text } }

@@ -1249,6 +1249,65 @@ function sanitizeHistoryTiming(entry) {
 	return changed;
 }
 //#endregion
+//#region src/services/usage-normalize.ts
+/** 取第一个可用的有限数值；0 是有效值，undefined/null/NaN 才跳过 */
+function firstNumber(...values) {
+	for (const value of values) {
+		if (typeof value === "number" && Number.isFinite(value)) return value;
+		if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
+	}
+	return null;
+}
+function positive(value) {
+	return value != null && value > 0 ? value : 0;
+}
+function isObject(value) {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+/**
+* 归一化任意 provider 的 usage 对象。
+* 全部 token 都为 0 或输入不是合法用量对象时返回 null（调用方应跳过该次记录，避免写入 0 token 污染条目）。
+*/
+function normalizeUsage(raw) {
+	if (!isObject(raw)) return null;
+	let source = raw;
+	if (isObject(source.usageMetadata)) source = {
+		...source,
+		...source.usageMetadata
+	};
+	const anthropic = firstNumber(source.cache_read_input_tokens, source.cache_creation_input_tokens) !== null;
+	const gemini = firstNumber(source.promptTokenCount, source.candidatesTokenCount, source.totalTokenCount, source.cachedContentTokenCount, source.thoughtsTokenCount) !== null;
+	const promptRaw = firstNumber(source.prompt_tokens, source.input_tokens, source.total_input_tokens, gemini ? source.promptTokenCount : void 0);
+	const completionRaw = firstNumber(source.completion_tokens, source.output_tokens, gemini ? source.candidatesTokenCount : void 0);
+	const hitRaw = firstNumber(source.prompt_cache_hit_tokens, source.cache_hit_tokens, source.prompt_tokens_details?.cached_tokens, source.input_tokens_details?.cached_tokens, source.cache_read_input_tokens, gemini ? source.cachedContentTokenCount : void 0, source.cached_tokens);
+	const missRaw = firstNumber(source.prompt_cache_miss_tokens, source.cache_miss_tokens);
+	const totalRaw = firstNumber(source.total_tokens, source.totalTokenCount);
+	const thinkRaw = firstNumber(source.completion_tokens_details?.reasoning_tokens, source.output_tokens_details?.reasoning_tokens, source.reasoning_tokens, source.thinking_tokens, source.thoughtsTokenCount);
+	const prompt = positive(promptRaw);
+	const completion = positive(completionRaw);
+	let hit = positive(hitRaw);
+	let miss = missRaw != null && missRaw >= 0 ? missRaw : -1;
+	if (miss < 0) {
+		if (anthropic) miss = prompt + positive(firstNumber(source.cache_creation_input_tokens));
+		else miss = Math.max(0, prompt - hit);
+	}
+	if (hit > prompt + miss && !anthropic && !gemini) hit = prompt + miss;
+	const promptTotal = Math.max(prompt, hit + miss);
+	if (promptTotal > hit + miss) miss = promptTotal - hit;
+	const computedTotal = hit + miss + completion;
+	const total = Math.max(totalRaw != null && totalRaw > 0 ? totalRaw : 0, computedTotal);
+	if (hit + miss + completion <= 0 && total <= 0) return null;
+	const think = Math.min(positive(thinkRaw), completion > 0 ? completion : positive(thinkRaw));
+	return {
+		prompt_tokens: hit + miss,
+		cache_hit_tokens: hit,
+		cache_miss_tokens: miss,
+		completion_tokens: completion,
+		total_tokens: total,
+		think_tokens: think
+	};
+}
+//#endregion
 //#region src/utils/crypto.ts
 var XOR_KEY = "ds-stats-v1-xor-key!@#$%^&*";
 function encryptKey(plaintext) {
@@ -2320,23 +2379,15 @@ var repository = {
 			log.debug("addEntry 跳过：usage 非对象 model=" + model);
 			return null;
 		}
-		if (!(typeof usage.prompt_tokens === "number" || typeof usage.completion_tokens === "number" || typeof usage.total_tokens === "number" || typeof usage.input_tokens === "number" || typeof usage.output_tokens === "number" || typeof usage.prompt_cache_hit_tokens === "number" || usage.prompt_tokens_details && typeof usage.prompt_tokens_details.cached_tokens === "number")) {
-			log.debug("addEntry 跳过：无 token 字段 model=" + model);
+		const norm = normalizeUsage(usage);
+		if (!norm) {
+			log.debug("addEntry 跳过：无法归一化或全 0 token model=" + model);
 			return null;
 		}
-		let hit = usage.prompt_cache_hit_tokens || 0;
-		if (!hit && usage.prompt_tokens_details?.cached_tokens) hit = usage.prompt_tokens_details.cached_tokens;
-		let miss = usage.prompt_cache_miss_tokens;
-		if (miss === void 0 || miss === null) {
-			miss = (usage.prompt_tokens || usage.input_tokens || 0) - hit;
-			if (miss < 0) miss = 0;
-		}
-		const comp = usage.completion_tokens || usage.output_tokens || 0;
-		const total = usage.total_tokens || hit + miss + comp;
-		if (hit === 0 && miss === 0 && comp === 0 && total === 0) {
-			log.debug("addEntry 跳过：全 0 token model=" + model);
-			return null;
-		}
+		const hit = norm.cache_hit_tokens;
+		const miss = norm.cache_miss_tokens;
+		const comp = norm.completion_tokens;
+		const total = norm.total_tokens;
 		log.debug("addEntry 解析", {
 			model,
 			hit,
@@ -2354,7 +2405,7 @@ var repository = {
 					const modelObservation = observeModel(wallet, model, nowTs);
 					if (modelObservation.changed) wallet.updatedAt = nowTs;
 					if (modelObservation.model?.source === "discovered" && modelObservation.model.price.priceConfigured !== true && !!wallet.catalogProvider) try {
-						import("./pricing-sync-B_rvY5O8.js").then((n) => n.a).then((module) => module.syncPricingFromModelsDev({ silent: true })).then(() => this.recalcWallet(wallet.id)).catch(() => {});
+						import("./pricing-sync-64F1Xs3N.js").then((n) => n.a).then((module) => module.syncPricingFromModelsDev({ silent: true })).then(() => this.recalcWallet(wallet.id)).catch(() => {});
 					} catch {}
 				}
 				wallet.lastUsedAt = nowTs;
@@ -2397,7 +2448,7 @@ var repository = {
 							head.isTruncated = isTruncatedFinish(fr);
 							changed = true;
 						}
-						const estThink = usage?.completion_tokens_details?.reasoning_tokens || usage?.__think_tokens_est || 0;
+						const estThink = norm.think_tokens || usage?.completion_tokens_details?.reasoning_tokens || usage?.__think_tokens_est || 0;
 						if (estThink && !head.thinkTokens) {
 							head.thinkTokens = estThink;
 							changed = true;
@@ -2484,7 +2535,7 @@ var repository = {
 			total_tokens: total
 		};
 		const duration = startTime ? Date.now() - startTime : 0;
-		const thinkTokens = usage.completion_tokens_details?.reasoning_tokens || usage?.__think_tokens_est || 0;
+		const thinkTokens = norm.think_tokens || usage.completion_tokens_details?.reasoning_tokens || usage?.__think_tokens_est || 0;
 		lu.duration = duration;
 		const nonStreamed = streamed === false;
 		lu.streamed = streamed;

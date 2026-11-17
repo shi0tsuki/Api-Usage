@@ -316,7 +316,8 @@ function installFetchCapture() {
               const trimmed = text.trim();
               if (trimmed.startsWith('{')) {
                 data = JSON.parse(trimmed);
-                try { finishReason = (data as any)?.choices?.[0]?.finish_reason ?? null; } catch {}
+                if (!data.usage && data.usageMetadata) data.usage = data.usageMetadata;
+                try { finishReason = (data as any)?.choices?.[0]?.finish_reason ?? (data as any)?.candidates?.[0]?.finishReason ?? null; } catch {}
               } else {
                 text.split('\n').forEach((line: string) => {
                   if (line.startsWith('data:')) {
@@ -325,8 +326,9 @@ function installFetchCapture() {
                     try {
                       const chunk = JSON.parse(payload);
                       if (chunk.usage) data = chunk;
+                      else if (chunk.usageMetadata) data = { usage: chunk.usageMetadata, model: chunk.model || data?.model };
                       if (!data && chunk.choices?.[0]?.usage) data = { usage: chunk.choices[0].usage, model: chunk.model };
-                      const fr = chunk?.choices?.[0]?.finish_reason;
+                      const fr = chunk?.choices?.[0]?.finish_reason ?? chunk?.candidates?.[0]?.finishReason;
                       if (fr != null) finishReason = fr;
                     } catch {}
                   }
@@ -334,6 +336,10 @@ function installFetchCapture() {
                 if (!data || !data.usage) {
                   const m = text.match(/"usage"\s*:\s*(\{[^\}]+\})/);
                   if (m) { try { const u = JSON.parse(m[1]); if (u && typeof u === 'object') data = { usage: u, model: data?.model }; } catch {} }
+                }
+                if (!data || !data.usage) {
+                  const mMeta = text.match(/"usageMetadata"\s*:\s*(\{[^\}]+\})/);
+                  if (mMeta) { try { const u = JSON.parse(mMeta[1]); if (u && typeof u === 'object') data = { usage: u, model: data?.model }; } catch {} }
                 }
               }
             } catch (e) {
@@ -563,6 +569,7 @@ export function uninstallInterception() {
 
 function isValidUsage(u: any): boolean {
   if (!u || typeof u !== 'object' || Array.isArray(u)) return false;
+  if (u.usageMetadata && isValidUsage(u.usageMetadata)) return true;
   return (
     typeof u.prompt_tokens === 'number' ||
     typeof u.completion_tokens === 'number' ||
@@ -571,7 +578,12 @@ function isValidUsage(u: any): boolean {
     typeof u.output_tokens === 'number' ||
     typeof u.prompt_cache_hit_tokens === 'number' ||
     typeof u.cached_tokens === 'number' ||
-    (u.prompt_tokens_details && typeof u.prompt_tokens_details.cached_tokens === 'number')
+    (u.prompt_tokens_details && typeof u.prompt_tokens_details.cached_tokens === 'number') ||
+    typeof u.promptTokenCount === 'number' ||
+    typeof u.candidatesTokenCount === 'number' ||
+    typeof u.totalTokenCount === 'number' ||
+    typeof u.cachedContentTokenCount === 'number' ||
+    typeof u.thoughtsTokenCount === 'number'
   );
 }
 
@@ -580,10 +592,13 @@ function pickUsageFromExtra(extra: any): any {
   const candidates = [
     extra.api_usage,
     extra.usage,
+    extra.usageMetadata,
     extra.openai_usage,
     extra.token_usage,
     extra.data?.usage,
+    extra.data?.usageMetadata,
     extra.response?.usage,
+    extra.response?.usageMetadata,
   ];
   for (const c of candidates) {
     if (isValidUsage(c)) return c;

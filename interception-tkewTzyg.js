@@ -1,6 +1,6 @@
 import { pn as __exportAll } from "./graphic-BAx7jeh4.js";
 import { t as log } from "./logger-8RGXnvfI.js";
-import { E as resolveRuntimeConnectionContext, T as initConnectionIdentity, t as repository } from "./repository-GlOd_EFe.js";
+import { E as resolveRuntimeConnectionContext, T as initConnectionIdentity, t as repository } from "./repository-wQpjWToJ.js";
 //#region src/services/include-usage.ts
 /**
 * 流式 usage 注入的纯逻辑：把 stream_options.include_usage 合并进用户/预设自定义的请求体参数。
@@ -134,8 +134,26 @@ function frameCarriers(record) {
 /** 取一帧增量里的思维链文本（空字符串视为无思维链） */
 function reasoningTextOf(record) {
 	if (!record || typeof record !== "object") return "";
+	const candidates = Array.isArray(record?.candidates) ? record.candidates : [];
+	for (const cand of candidates) {
+		const parts = Array.isArray(cand?.content?.parts) ? cand.content.parts : Array.isArray(cand?.delta?.parts) ? cand.delta.parts : Array.isArray(cand?.parts) ? cand.parts : [];
+		for (const part of parts) {
+			if (!part || typeof part !== "object") continue;
+			if (part.thought === true || part.type === "thought") {
+				const text = textOf(part.text || part.thought);
+				if (text) return text;
+			}
+		}
+	}
 	for (const carrier of frameCarriers(record)) {
 		if (!carrier || typeof carrier !== "object") continue;
+		if (Array.isArray(carrier.parts)) for (const part of carrier.parts) {
+			if (!part || typeof part !== "object") continue;
+			if (part.thought === true || part.type === "thought") {
+				const text = textOf(part.text);
+				if (text) return text;
+			}
+		}
 		for (const key of REASONING_KEYS) {
 			const text = textOf(carrier[key]);
 			if (text) return text;
@@ -146,8 +164,24 @@ function reasoningTextOf(record) {
 /** 取一帧增量里的正文文本（空字符串=尚无正文，例如仅带 content:null 的思维链帧） */
 function contentTextOf$1(record) {
 	if (!record || typeof record !== "object") return "";
+	const candidates = Array.isArray(record?.candidates) ? record.candidates : [];
+	for (const cand of candidates) {
+		const parts = Array.isArray(cand?.content?.parts) ? cand.content.parts : Array.isArray(cand?.delta?.parts) ? cand.delta.parts : Array.isArray(cand?.parts) ? cand.parts : [];
+		for (const part of parts) {
+			if (!part || typeof part !== "object") continue;
+			if (part.thought === true || part.type === "thought") continue;
+			const text = textOf(part.text);
+			if (text) return text;
+		}
+	}
 	for (const carrier of frameCarriers(record)) {
 		if (!carrier || typeof carrier !== "object") continue;
+		if (Array.isArray(carrier.parts)) for (const part of carrier.parts) {
+			if (!part || typeof part !== "object") continue;
+			if (part.thought === true || part.type === "thought") continue;
+			const text = textOf(part.text);
+			if (text) return text;
+		}
 		const direct = textOf(carrier.content);
 		if (direct) return direct;
 		if (carrier.type === "text_delta") {
@@ -483,7 +517,12 @@ var USAGE_KEYS = [
 	"output_tokens",
 	"cached_tokens",
 	"prompt_cache_hit_tokens",
-	"prompt_cache_miss_tokens"
+	"prompt_cache_miss_tokens",
+	"promptTokenCount",
+	"candidatesTokenCount",
+	"totalTokenCount",
+	"cachedContentTokenCount",
+	"thoughtsTokenCount"
 ];
 var buffer = [];
 function readPersisted() {
@@ -549,7 +588,10 @@ function isZeroUsage(usage) {
 		"completion_tokens",
 		"total_tokens",
 		"input_tokens",
-		"output_tokens"
+		"output_tokens",
+		"promptTokenCount",
+		"candidatesTokenCount",
+		"totalTokenCount"
 	].filter((k) => typeof n[k] === "number");
 	if (!present.length) return false;
 	return present.every((k) => n[k] === 0);
@@ -1043,8 +1085,9 @@ function installFetchCapture() {
 								const trimmed = text.trim();
 								if (trimmed.startsWith("{")) {
 									data = JSON.parse(trimmed);
+									if (!data.usage && data.usageMetadata) data.usage = data.usageMetadata;
 									try {
-										finishReason = data?.choices?.[0]?.finish_reason ?? null;
+										finishReason = data?.choices?.[0]?.finish_reason ?? data?.candidates?.[0]?.finishReason ?? null;
 									} catch {}
 								} else {
 									text.split("\n").forEach((line) => {
@@ -1054,11 +1097,15 @@ function installFetchCapture() {
 											try {
 												const chunk = JSON.parse(payload);
 												if (chunk.usage) data = chunk;
+												else if (chunk.usageMetadata) data = {
+													usage: chunk.usageMetadata,
+													model: chunk.model || data?.model
+												};
 												if (!data && chunk.choices?.[0]?.usage) data = {
 													usage: chunk.choices[0].usage,
 													model: chunk.model
 												};
-												const fr = chunk?.choices?.[0]?.finish_reason;
+												const fr = chunk?.choices?.[0]?.finish_reason ?? chunk?.candidates?.[0]?.finishReason;
 												if (fr != null) finishReason = fr;
 											} catch {}
 										}
@@ -1067,6 +1114,16 @@ function installFetchCapture() {
 										const m = text.match(/"usage"\s*:\s*(\{[^\}]+\})/);
 										if (m) try {
 											const u = JSON.parse(m[1]);
+											if (u && typeof u === "object") data = {
+												usage: u,
+												model: data?.model
+											};
+										} catch {}
+									}
+									if (!data || !data.usage) {
+										const mMeta = text.match(/"usageMetadata"\s*:\s*(\{[^\}]+\})/);
+										if (mMeta) try {
+											const u = JSON.parse(mMeta[1]);
 											if (u && typeof u === "object") data = {
 												usage: u,
 												model: data?.model
@@ -1352,17 +1409,21 @@ function uninstallInterception() {
 }
 function isValidUsage(u) {
 	if (!u || typeof u !== "object" || Array.isArray(u)) return false;
-	return typeof u.prompt_tokens === "number" || typeof u.completion_tokens === "number" || typeof u.total_tokens === "number" || typeof u.input_tokens === "number" || typeof u.output_tokens === "number" || typeof u.prompt_cache_hit_tokens === "number" || typeof u.cached_tokens === "number" || u.prompt_tokens_details && typeof u.prompt_tokens_details.cached_tokens === "number";
+	if (u.usageMetadata && isValidUsage(u.usageMetadata)) return true;
+	return typeof u.prompt_tokens === "number" || typeof u.completion_tokens === "number" || typeof u.total_tokens === "number" || typeof u.input_tokens === "number" || typeof u.output_tokens === "number" || typeof u.prompt_cache_hit_tokens === "number" || typeof u.cached_tokens === "number" || u.prompt_tokens_details && typeof u.prompt_tokens_details.cached_tokens === "number" || typeof u.promptTokenCount === "number" || typeof u.candidatesTokenCount === "number" || typeof u.totalTokenCount === "number" || typeof u.cachedContentTokenCount === "number" || typeof u.thoughtsTokenCount === "number";
 }
 function pickUsageFromExtra(extra) {
 	if (!extra || typeof extra !== "object") return null;
 	const candidates = [
 		extra.api_usage,
 		extra.usage,
+		extra.usageMetadata,
 		extra.openai_usage,
 		extra.token_usage,
 		extra.data?.usage,
-		extra.response?.usage
+		extra.data?.usageMetadata,
+		extra.response?.usage,
+		extra.response?.usageMetadata
 	];
 	for (const c of candidates) if (isValidUsage(c)) return c;
 	if (isValidUsage(extra)) return extra;

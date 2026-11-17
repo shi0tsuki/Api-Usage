@@ -17,6 +17,7 @@ import { turnFingerprint } from './fingerprint';
 import { mobileDeviceHint } from '../utils/device';
 import { computeTokenRate, sanitizeHistoryTiming } from './token-rate';
 import { normalizeConnectionEndpoint, type HistoryConnection } from '../services/connection-identity';
+import { normalizeUsage } from '../services/usage-normalize';
 import {
   createDeepSeekWallet,
   createWalletFromConnection,
@@ -1111,34 +1112,20 @@ export const repository = {
     const rawModel = String(model);
     model = normalizeModel(rawModel);
     log.debug('addEntry 收到', { model, hasMessages: !!messages?.length });
-    // 容错：拒绝数字/空对象导致的 0 token 污染条目
+    // 容错：拒绝数字/空对象或无法归一化的 0 token 污染条目
     if (!usage || typeof usage !== 'object' || Array.isArray(usage)) {
       log.debug('addEntry 跳过：usage 非对象 model=' + model);
       return null as any;
     }
-    const hasAnyTokenField =
-      typeof usage.prompt_tokens === 'number' ||
-      typeof usage.completion_tokens === 'number' ||
-      typeof usage.total_tokens === 'number' ||
-      typeof usage.input_tokens === 'number' ||
-      typeof usage.output_tokens === 'number' ||
-      typeof usage.prompt_cache_hit_tokens === 'number' ||
-      (usage.prompt_tokens_details && typeof usage.prompt_tokens_details.cached_tokens === 'number');
-    if (!hasAnyTokenField) {
-      log.debug('addEntry 跳过：无 token 字段 model=' + model);
+    const norm = normalizeUsage(usage);
+    if (!norm) {
+      log.debug('addEntry 跳过：无法归一化或全 0 token model=' + model);
       return null as any;
     }
-    let hit = usage.prompt_cache_hit_tokens || 0;
-    if (!hit && usage.prompt_tokens_details?.cached_tokens) hit = usage.prompt_tokens_details.cached_tokens;
-    let miss = usage.prompt_cache_miss_tokens;
-    if (miss === undefined || miss === null) { miss = (usage.prompt_tokens || usage.input_tokens || 0) - hit; if (miss < 0) miss = 0; }
-    const comp = usage.completion_tokens || usage.output_tokens || 0;
-    const total = usage.total_tokens || hit + miss + comp;
-    // 若解析后仍全 0，视为无效数据，不写入历史
-    if (hit === 0 && miss === 0 && comp === 0 && total === 0) {
-      log.debug('addEntry 跳过：全 0 token model=' + model);
-      return null as any;
-    }
+    const hit = norm.cache_hit_tokens;
+    const miss = norm.cache_miss_tokens;
+    const comp = norm.completion_tokens;
+    const total = norm.total_tokens;
     log.debug('addEntry 解析', { model, hit, miss, comp, total });
     const fr = finishReason ?? (usage as any)?.__finish_reason ?? (usage as any)?.finish_reason ?? null;
     const nowTs = Date.now();
@@ -1196,7 +1183,7 @@ export const repository = {
             }
             if (fullResponse && !head.fullResponse) { head.fullResponse = clampResponse(fullResponse); changed = true; }
             if (fr && !head.finishReason) { head.finishReason = fr; head.isTruncated = isTruncatedFinish(fr); changed = true; }
-            const estThink = usage?.completion_tokens_details?.reasoning_tokens || (usage as any)?.__think_tokens_est || 0;
+            const estThink = norm.think_tokens || usage?.completion_tokens_details?.reasoning_tokens || (usage as any)?.__think_tokens_est || 0;
             if (estThink && !head.thinkTokens) { head.thinkTokens = estThink; changed = true; }
             if (ttft && !head.ttft) {
               // 非流式/假流式：TTFT 与速率均不可信，一并归零
@@ -1254,7 +1241,7 @@ export const repository = {
     } catch {}
     const lu: any = { timestamp: Date.now(), model, rawModel: rawModel !== model ? rawModel : null, prompt_tokens: hit + miss, prompt_cache_hit_tokens: hit, prompt_cache_miss_tokens: miss, completion_tokens: comp, total_tokens: total };
     const duration = startTime ? Date.now() - startTime : 0;
-    const thinkTokens = usage.completion_tokens_details?.reasoning_tokens || (usage as any)?.__think_tokens_est || 0;
+    const thinkTokens = norm.think_tokens || usage.completion_tokens_details?.reasoning_tokens || (usage as any)?.__think_tokens_est || 0;
     lu.duration = duration;
     // 非流式/假流式：TTFT 不可信（等于总耗时），速率分母塌缩会算出假速率，两者一并归零
     const nonStreamed = streamed === false;

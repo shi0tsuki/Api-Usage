@@ -65,6 +65,11 @@ const USAGE_KEYS = [
   'cached_tokens',
   'prompt_cache_hit_tokens',
   'prompt_cache_miss_tokens',
+  'promptTokenCount',
+  'candidatesTokenCount',
+  'totalTokenCount',
+  'cachedContentTokenCount',
+  'thoughtsTokenCount',
 ];
 
 let buffer: CaptureRecord[] = [];
@@ -130,7 +135,16 @@ export function usageNumbers(usage: any): Record<string, number> | null {
 export function isZeroUsage(usage: any): boolean {
   const n = usageNumbers(usage);
   if (!n) return false;
-  const keys = ['prompt_tokens', 'completion_tokens', 'total_tokens', 'input_tokens', 'output_tokens'];
+  const keys = [
+    'prompt_tokens',
+    'completion_tokens',
+    'total_tokens',
+    'input_tokens',
+    'output_tokens',
+    'promptTokenCount',
+    'candidatesTokenCount',
+    'totalTokenCount',
+  ];
   const present = keys.filter((k) => typeof n[k] === 'number');
   if (!present.length) return false;
   return present.every((k) => n[k] === 0);
